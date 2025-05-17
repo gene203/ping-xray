@@ -20,7 +20,11 @@
 #   For updates: https://dimon.ca/ping-xray
 #                https://github.com/shevkoplyas/ping-xray
 #
-# Usage example: ./ping-xray 10.0.0.1_wifi_router 99.251.104.1_ISP_Gateway_\(Rogers\) 8.8.8.8_DNS dimon.ca lib.ru
+# Usage example: ./ping-xray [-c columns] [-l lines] 10.0.0.1_wifi_router 99.251.104.1_ISP_Gateway_\(Rogers\) 8.8.8.8_DNS dimon.ca lib.ru
+#
+#  Options:
+#    -c columns : Maximum number of targets per row (default: 3)
+#    -l lines   : Number of lines to display per target (default: 10)
 #
 #  For feedback: shevkoplyas at gmail dot com. Please report bugs/improvements/etc.
 #
@@ -189,9 +193,51 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# Maximum targets per row (default)
+MAX_TARGETS_PER_ROW=3
+# Fixed number of lines per item (default)
+FIXED_LINES_PER_ITEM=10
+
+# Process command line options
+while getopts ":c:l:" opt; do
+  case $opt in
+    c)
+      MAX_TARGETS_PER_ROW=$OPTARG
+      ;;
+    l)
+      FIXED_LINES_PER_ITEM=$OPTARG
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      echo "Usage: $0 [-c columns] [-l lines] target1 [target2 ...]" >&2
+      exit 1
+      ;;
+    :)
+      echo "Option -$OPTARG requires an argument." >&2
+      echo "Usage: $0 [-c columns] [-l lines] target1 [target2 ...]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Use OPTIND to move to the start of non-option arguments
+shift $((OPTIND-1))
+
+# Validate option values
+if ! [[ "$MAX_TARGETS_PER_ROW" =~ ^[0-9]+$ ]] || [ "$MAX_TARGETS_PER_ROW" -lt 1 ]; then
+    echo "Error: Number of columns (-c) must be an integer greater than 0." >&2
+    exit 1
+fi
+
+if ! [[ "$FIXED_LINES_PER_ITEM" =~ ^[0-9]+$ ]] || [ "$FIXED_LINES_PER_ITEM" -lt 1 ]; then
+    echo "Error: Number of lines (-l) must be an integer greater than 0." >&2
+    exit 1
+fi
+
 # If no arguments specified report an error and exit.
 if [ "${1}" == "" ]; then
-    echo "Error: please specify at least one target to ping" >&2
+    echo "Error: At least one target must be specified." >&2
+    echo "Usage: $0 [-c columns] [-l lines] target1 [target2 ...]" >&2
     exit 1
 fi
 
@@ -987,47 +1033,64 @@ main_loop (){
 #
 # curses will call main() periodically to redraw the "GUI" (every second)
 #
+# number of targets per a row
+#MAX_TARGETS_PER_ROW=3
+# max lines per item
+#FIXED_LINES_PER_ITEM=10
+
 function main_curses_draw () {
+    # Track current row and column position
+    CURRENT_ROW=0
+    CURRENT_COL=0
 
-# another way to iterate 2 bash arrays in parallel would be using index
-for TARGET_IDX in "${!TARGETS[@]}"; do
-    iTARGET="${TARGETS[$TARGET_IDX]}"
-    iLABEL="${TARGETS_LABELS[$TARGET_IDX]}"
-    iLOG_FILE="${LOG_FILES_BASENAME}_${iTARGET}"
-    LOG_FILE="${LOG_FILES[$TARGET_IDX]}"
+    for TARGET_IDX in "${!TARGETS[@]}"; do
+        iTARGET="${TARGETS[$TARGET_IDX]}"
+        iLABEL="${TARGETS_LABELS[$TARGET_IDX]}"
+        iLOG_FILE="${LOG_FILES_BASENAME}_${iTARGET}"
+        
+        # Check if we need to move to a new row
+        if [ $((TARGET_IDX % MAX_TARGETS_PER_ROW)) -eq 0 ] && [ ${TARGET_IDX} -gt 0 ]; then
+            CURRENT_ROW=$((CURRENT_ROW + 1))
+            CURRENT_COL=0
+            # Move to the start position of the new row (minimize row spacing)
+            POSX=0
+            #POSY=$((POSY + 1))
+        fi
 
-    # window width
-    # 1st window 81 cols wide
-    WINDOW_SIZE=81
-    if [ ${TARGET_IDX} -gt 0 ]; then
-        # 2nd window (and all the rest): a bit narrower (since timestamp suppressed)
+        # Set window width - make all columns the same width
         WINDOW_SIZE=64
-        col_right
-        move_up
-    fi
+        
+        if [ $CURRENT_COL -gt 0 ]; then
+            col_right
+            if [ $CURRENT_ROW -eq 0 ]; then
+                move_up
+            fi
+        fi
 
-    window "${iTARGET} ${iLABEL}" "grey" "${WINDOW_SIZE}"
+        window "${iTARGET} ${iLABEL}" "grey" "${WINDOW_SIZE}"
 
-    # LINES is the number of lines available in the terminal window
-    # We can only fit LINES-4 lines of our ping output (3 lines for headers on top and one line on the bottom)
-    TAIL_N_LINES=$(( LINES - 4 ))
+        # Use fixed number of lines
+        TAIL_N_LINES=$FIXED_LINES_PER_ITEM
 
-    if [ ${TARGET_IDX} -gt 0 ]; then
-        # 2nd window (and all the rest):
-        # append tail line-by-line after "grepping" by awk. We suppressing excessive timestamps here.
-        # see also:
-        # # http://stackoverflow.com/questions/4165135/how-to-use-while-read-bash-to-read-the-last-line-in-a-file-if-theres-no-new
-        while IFS='' read -r line || [[ -n "${line}" ]]; do
-            _append "${line}" left
-        done < <( tail -n ${TAIL_N_LINES} ${iLOG_FILE} | awk '{print $3}' )
-    else
-        # 1st window (leftmost):
-        # just simply gets the output of tail command:
-        append_command "tail -n ${TAIL_N_LINES} ${iLOG_FILE}"
-    fi
-    endwin
-
-done
+        if [ $CURRENT_COL -gt 0 ]; then
+            # Windows after the first one:
+            # Remove excessive timestamps and add line by line
+            while IFS='' read -r line || [[ -n "${line}" ]]; do
+                _append "${line}" left
+            done < <( tail -n ${TAIL_N_LINES} ${iLOG_FILE} | awk '{print $3}' )
+        else
+            # First window (leftmost):
+            # Format the output to match other columns
+            while IFS='' read -r line || [[ -n "${line}" ]]; do
+                # Keep only the timestamp and the data part
+                formatted_line=$(echo "$line" | awk '{print $1, $2, $3}')
+                _append "${formatted_line}" left
+            done < <( tail -n ${TAIL_N_LINES} ${iLOG_FILE} )
+        fi
+        endwin
+        
+        CURRENT_COL=$((CURRENT_COL + 1))
+    done
 }
 
 
